@@ -1,0 +1,443 @@
+#!/usr/bin/env python
+
+
+"""
+sigma-reconstruct-genome
+
+sigma-reconstruct-genome is a program for reconstructing genomes 
+based on the IPOPT results. 
+
+Created by Tae-Hyuk (Ted) Ahn on 04/01/2013.
+Copyright (c) 2013 Tae-Hyuk Ahn (ORNL). Allrights reserved.
+"""
+
+
+## Import Python package modules
+import sys, warnings, os, getopt
+import time
+from datetime import datetime
+from subprocess import Popen, PIPE, check_call, STDOUT
+## Import in-house python modules
+## sigma_dir = os.path.split(sys.argv[0])[0]
+## sys.path.append(sigma_dir + '/python_module')
+import utils
+import sigma_core
+import sigma_parse_config
+
+
+## Version control
+version = "1.0.1 (Beta)" 
+"""
+1. Release V1.0.1
+"""
+
+
+## Help message
+help_message = '''
+
+  [Usage]
+    sigma-reconstruct-genome [options] -c <config file path> -w <working directory>
+
+  [Inputs]
+    1. config file path (default: sigma_config.cfg)
+      - if config_file is not specified, the program will search it in the working directory.
+    2. working directory (default = current running directory)
+      - if working_directory is not specified, the program will work in the current directory.
+      - results will be generated in working directory
+
+  [Options]
+    -h/--help
+    -v/--version
+
+  [Outputs]
+    genome_basename.full.fna
+    genome_basename.SNPs.fna
+'''
+
+
+## Import classes
+ConfigString = sigma_parse_config.ConfigString
+
+
+## global variables
+config_path_str       = "config_path"
+working_directory_str = "working_directory"
+
+
+## Parse options
+def parse_option(argv, version, help_message):
+
+    # initialize variables
+    working_directory = "./"
+    config_file       = "sigma_config.cfg"
+    config_path       = working_directory + config_file
+
+    # option map dictionay
+    option_map = {}
+
+    # get arguments
+    try:
+        opts, args = getopt.getopt(argv[1:], "c:w:hvV",
+                                    ["help",
+                                     "version"])
+
+    # Error handling of options
+    except getopt.error, msg:
+        raise utils.Usage(msg)
+
+    # get program name
+    program_name =  sys.argv[0].split("/")[-1]
+
+    # Basic options
+    for option, value in opts:
+        # config file
+        if option in ("-c"):
+            config_path = value
+        # working directory
+        if option in ("-w"):
+            working_directory = value
+            if working_directory[-1] != '/':
+               working_directory += '/'
+        # help
+        if option in ("-h", "--help"):
+            raise utils.Usage(help_message)
+        # version
+        if option in ("-v", "-V", "--version"):
+            print "\n%s V%s\n" % (program_name, version)
+            sys.exit(0)
+
+    # only -w is provided
+    if working_directory != "./" and config_path == "./sigma_config.cfg":
+        config_path = working_directory + config_file
+
+    # check config file path exist
+    if not utils.check_path_exist(config_path):
+        sys.stderr.write("\n** Cannot open %s. For help use -h/--help.\n" % config_path)
+        utils.die("** Program exit!")
+
+    # check working directory path exist
+    if not utils.check_path_exist(working_directory):
+        sys.stderr.write("\n** Cannot open %s. For help use -h/--help.\n" % working_directory)
+        utils.die("** Program exit!")
+
+    # option_map
+    option_map[config_path_str] = config_path
+    option_map[working_directory_str] = working_directory
+
+    return (option_map)
+
+
+# reconstruct each target genome
+def reconstruct_target_genome(minumum_coverage_length,
+                              minimum_average_coverage_depth,
+                              qmatrix_path,
+                              paired_end_reads_flag,
+                              fasta_reads_flag,
+                              genome_chance_map,
+                              genome_name,
+                              genome_directory,
+                              genome_enum,
+                              target_genome_index,
+                              genome_fasta_path_sublist,
+                              output_genome_directory,
+                              samtools_path,
+                              samout_path,
+                              bamout_path):
+
+    # get genome fasta id, description, and sequence
+    (genome_fasta_id_list, genome_fasta_id_description_map, 
+     genome_fasta_sequence_list) = sigma_core.get_genome_fasta_id_sequence(genome_fasta_path_sublist, 
+                                                                            genome_name)
+
+    # initialize sequence tvalue list
+    (sequence_a_tvalue_list, sequence_c_tvalue_list, sequence_g_tvalue_list, sequence_t_tvalue_list, 
+     sequence_all_count_list) = sigma_core.initialize_sequence_count(genome_fasta_id_list, 
+                                                                      genome_fasta_sequence_list)
+
+    # get output (new reconstructed fasta format genome) path list
+    output_genome_fasta_path_sublist = sigma_core.get_output_genome_fasta_path_sublist(output_genome_directory, 
+                                                                                        genome_fasta_path_sublist)
+
+    # get output (SNPs locations) path list
+    output_diff_sequence_path_sublist = sigma_core.get_output_diff_sequence_path_sublist(output_genome_directory, 
+                                                                                          genome_fasta_path_sublist)
+
+    # get tvalue_map: T(i,j) for j genome (key:read_id, val:tvalue))
+    tvalue_map = sigma_core.get_tvalue(qmatrix_path, genome_chance_map, target_genome_index)
+
+    # convert bam to sam
+    if utils.check_path_exist(bamout_path):    
+        system_cmd = samtools_path + " view -h " + bamout_path + " -o " + samout_path    
+        check_call(system_cmd, shell=True, stdout = PIPE, stderr = sys.stderr)  
+
+    with open(samout_path, 'r') as f:
+        for read_line in f:
+
+            # get read_line
+            read_line = read_line.strip()
+            # do not read heder lines
+            if read_line[0] == '@':
+                continue
+
+            # split by tab
+            read_line_list = read_line.split('\t')
+
+            # call ParseSamout class for read_line_list
+            read_obj = sigma_core.ParseSamout(read_line_list)
+
+            # get read info
+            read_id = read_obj.get_read_id(paired_end_reads_flag, fasta_reads_flag)
+            reference_name = read_obj.get_reference_name()
+            genome_fasta_enum = genome_fasta_id_list.index(reference_name)
+            read_sequence = read_obj.get_read_sequence()
+            (start_position, end_position) = read_obj.get_start_end_position()
+
+            # check tvalue exist
+            if read_id in tvalue_map:
+                read_tvalue = tvalue_map[read_id]
+
+                # update sequence_tvalue_list
+                for sequence_letter_enum, sequence_letter in enumerate(read_sequence):
+                    # get sequence_letter_position
+                    sequence_letter_position = start_position + sequence_letter_enum
+                    # update sequence_all_count_list
+                    sequence_all_count_list[genome_fasta_enum][sequence_letter_position] += 1
+                    if sequence_letter in ['a', 'A']:
+                        sequence_a_tvalue_list[genome_fasta_enum][sequence_letter_position] += read_tvalue
+                    elif sequence_letter in ['c', 'C']:
+                        sequence_c_tvalue_list[genome_fasta_enum][sequence_letter_position] += read_tvalue
+                    elif sequence_letter in ['g', 'G']:
+                        sequence_g_tvalue_list[genome_fasta_enum][sequence_letter_position] += read_tvalue
+                    elif sequence_letter in ['t', 'T']:
+                        sequence_t_tvalue_list[genome_fasta_enum][sequence_letter_position] += read_tvalue
+
+    # delete sam file                                                                                              
+    if utils.check_path_exist(samout_path):
+        rm_cmd = "rm -f " + samout_path
+        check_call(rm_cmd, shell=True, stdout = PIPE, stderr = sys.stderr)
+
+    # get diff_genome_fasta_sequence_list, diff_sequence_letter_list, diff_sequence_letter_position_list
+    (diff_genome_fasta_sequence_list, diff_sequence_letter_list, diff_sequence_letter_position_list) \
+        = sigma_core.get_diff_genome_fasta_sequence_list(genome_fasta_id_list, genome_fasta_sequence_list, \
+            sequence_a_tvalue_list, sequence_c_tvalue_list, sequence_g_tvalue_list, sequence_t_tvalue_list, \
+            sequence_all_count_list)
+
+    # get output_genome_fasta_sequence_list
+    (output_genome_fasta_sequence_list) = sigma_core.get_output_genome_fasta_sequence_list(genome_fasta_id_list, \
+        genome_fasta_sequence_list, sequence_all_count_list, diff_genome_fasta_sequence_list, \
+        minumum_coverage_length, minimum_average_coverage_depth)
+
+    # loop fasta files
+    for genome_fasta_enum, genome_fasta_id in enumerate(genome_fasta_id_list):
+
+        # get genome_fasta_size
+        fasta_line_size = 70
+        genome_fasta_size = len(output_genome_fasta_sequence_list[genome_fasta_enum])
+        genome_fasta_chunk_size = int(genome_fasta_size / fasta_line_size)
+        genome_fasta_chunk_remainder = int(genome_fasta_size % fasta_line_size)
+
+        # output_genome_fasta
+        output_genome_fasta_path = output_genome_fasta_path_sublist[genome_fasta_enum]
+        output_genome_fasta = open(output_genome_fasta_path, 'wb')
+
+        # print genome fasta ID and description
+        genome_fasta_description = genome_fasta_id_description_map[genome_fasta_id]
+        output_genome_fasta.write(">" + genome_fasta_id + " " + genome_fasta_description + "\n")
+
+        # loop sequence letters
+        for genome_fasta_chunk_index in range(0, genome_fasta_chunk_size):
+            chunk_start_position = genome_fasta_chunk_index*fasta_line_size
+            chunk_end_position = chunk_start_position + fasta_line_size
+            chunk_sequence = ''.join(output_genome_fasta_sequence_list[genome_fasta_enum][chunk_start_position:chunk_end_position])
+            output_genome_fasta.write(chunk_sequence + "\n")
+        # for last line of genome fasta file
+        chunk_start_position = genome_fasta_chunk_size*fasta_line_size
+        chunk_end_position = chunk_start_position + genome_fasta_chunk_remainder 
+        chunk_sequence = ''.join(output_genome_fasta_sequence_list[genome_fasta_enum][chunk_start_position:chunk_end_position])
+        output_genome_fasta.write(chunk_sequence + "\n")
+
+        # output_diff_sequence
+        output_diff_sequence_path = output_diff_sequence_path_sublist[genome_fasta_enum]
+        output_diff_sequence = open(output_diff_sequence_path, 'wb')
+
+        # print header
+        output_diff_sequence.write("#\tReference_Position\tOriginal_Base>Converted_Base\n")
+
+        # print output_diff_sequence
+        for diff_sequence_letter_enum, diff_sequence_letter in enumerate(diff_sequence_letter_list[genome_fasta_enum]):
+            diff_sequence_letter_position = int(diff_sequence_letter_position_list[genome_fasta_enum][diff_sequence_letter_enum])
+            original_sequence_letter = genome_fasta_sequence_list[genome_fasta_enum][diff_sequence_letter_position]
+            output_sequence_letter = output_genome_fasta_sequence_list[genome_fasta_enum][diff_sequence_letter_position]
+            if output_sequence_letter.isupper():
+                output_sequence_letter_position = diff_sequence_letter_position + 1
+                output_sequence_letter_diff = original_sequence_letter + ">" + diff_sequence_letter
+                output_diff_sequence.write(str(output_sequence_letter_position) + "\t" + output_sequence_letter_diff + "\n")
+
+    # clear tvalue_map
+    tvalue_map.clear()
+    # clear genome_fasta_id_list
+    del genome_fasta_id_list[:]
+    # clear genome_fasta_sequence_list
+    del genome_fasta_sequence_list[:]
+    # clear sequence count list
+    del sequence_a_tvalue_list[:]
+    del sequence_c_tvalue_list[:]
+    del sequence_g_tvalue_list[:]
+    del sequence_t_tvalue_list[:]
+    del sequence_all_count_list[:]
+    # clear updated sequence list
+    del diff_genome_fasta_sequence_list[:]
+    del diff_sequence_letter_list[:]
+    del diff_sequence_letter_position_list[:]
+    del output_genome_fasta_sequence_list[:]
+
+
+def reconstruct_genomes(option_map, config_map, genome_directory_list, genome_fasta_path_list, output_genome_directory_list):
+
+    # get option
+    config_path = option_map[config_path_str]
+    working_directory = option_map[working_directory_str]
+
+    # get config default
+    reconstruction_selection = 1
+    reconstruction_cutoff_abundance = 1.0
+    reconstruction_genome_name = ""
+    minumum_coverage_length = 100
+    samtools_cmd = "samtools"
+    samtools_path = samtools_cmd
+
+    # get config value
+    if config_map[ConfigString.reconstruction_selection_str]:
+        reconstruction_selection = int(config_map[ConfigString.reconstruction_selection_str])
+    if config_map[ConfigString.reconstruction_cutoff_abundance_str]:
+        reconstruction_cutoff_abundance = float(config_map[ConfigString.reconstruction_cutoff_abundance_str])
+    if config_map[ConfigString.reconstruction_genome_name_str]:
+        reconstruction_genome_name = config_map[ConfigString.reconstruction_genome_name_str]
+    if config_map[ConfigString.minumum_coverage_length_str]:
+        minumum_coverage_length = int(config_map[ConfigString.minumum_coverage_length_str])
+    if config_map[ConfigString.minimum_average_coverage_depth_str]:
+        minimum_average_coverage_depth = float(config_map[ConfigString.minimum_average_coverage_depth_str])
+    if config_map[ConfigString.samtools_directory_str]:
+        samtools_directory = config_map[ConfigString.samtools_directory_str]
+        if samtools_directory[-1] != '/':
+            samtools_directory += '/'
+        samtools_path = samtools_directory + samtools_cmd
+
+    # get g-vector path
+    qmatrix_filename = "sigma_out.qmatrix.txt"
+    qmatrix_basename = '.'.join(qmatrix_filename.split('.')[0:-2])
+    qmatrix_path = working_directory + qmatrix_filename
+    gvector_path = working_directory + qmatrix_basename + ".gvector.txt"
+
+    # get paried_reads_flag and fasta_reads_flag
+    (paired_end_reads_flag, fasta_reads_flag) = sigma_core.get_reads_type(config_map)
+
+    # get genome_directory_map and output_genome_directory_map
+    (genome_directory_map, output_genome_directory_map) = sigma_core.get_genome_directory_map(genome_directory_list, output_genome_directory_list)
+
+    # get target genome list (g_vector percentage >= cutoff_reconstruction_percentage)
+    (genome_name_map, genome_chance_map, target_genome_index_list) = sigma_core.get_target_genome(gvector_path, 
+                                                                                                  reconstruction_selection, 
+                                                                                                  reconstruction_cutoff_abundance,
+                                                                                                  reconstruction_genome_name)
+
+    # for loop target_genome_index_list
+    for target_genome_enum, target_genome_index in enumerate(target_genome_index_list):
+
+        # get genome info
+        genome_name = genome_name_map[target_genome_index]
+        genome_directory = genome_directory_map[genome_name]
+        genome_enum = genome_directory_list.index(genome_directory)
+        genome_fasta_path_sublist = genome_fasta_path_list[genome_enum]
+        output_genome_directory = output_genome_directory_map[genome_name]
+        samout_path = sigma_core.get_samout_path(config_path, output_genome_directory)
+        bamout_path = sigma_core.get_bamout_path(config_path, output_genome_directory)
+
+        # reconstruct each target genome
+        reconstruct_target_genome(minumum_coverage_length,
+                                  minimum_average_coverage_depth,
+                                  qmatrix_path,
+                                  paired_end_reads_flag,
+                                  fasta_reads_flag,
+                                  genome_chance_map,
+                                  genome_name,
+                                  genome_directory,
+                                  genome_enum,
+                                  target_genome_index,
+                                  genome_fasta_path_sublist,
+                                  output_genome_directory,
+                                  samtools_path,
+                                  samout_path,
+                                  bamout_path)
+
+        sys.stdout.write("  Genome (%s) has been reconstructed." % (genome_name))
+        
+                           
+def main(argv=None):
+
+    # try to get arguments and error handling
+    try:
+        if argv is None:
+            argv = sys.argv
+        try:
+            # get program name
+            program_name =  os.path.basename(sys.argv[0])
+
+            # parse option
+            (option_map) = parse_option(argv, version, help_message)
+
+            # parse config
+            (config_map) = sigma_parse_config.parse_config(option_map)
+
+            # Display work start and time record
+            start_time = datetime.now()
+            sys.stdout.write("\n********************************************************************************\n")
+            sys.stdout.write("[%s] Beginning %s run (V%s)\n" % (utils.curr_time(), program_name, version))
+
+            # Step 1
+            sys.stdout.write("  [Step 1] Prepare genome reconstruction: ")
+            sys.stdout.write("Running -> ")
+
+            # call sigma_core.search_genome_fasta_path
+            (genome_directory_list, genome_fasta_path_list) = sigma_core.search_genome_fasta_path(config_map)
+
+            # call sigma_core.get_output_genome_directory_list
+            (output_genome_directory_list) = sigma_core.get_output_genome_directory_list(option_map, config_map, genome_directory_list)
+
+            # Step 1 - end
+            sys.stdout.write('Done!\n')
+
+            # Step 2 - start
+            sys.stdout.write("  [Step 2] Work genome reconstruction: ")
+            sys.stdout.write("Running -> ")
+
+            # Reconstruct genomes
+            reconstruct_genomes(option_map, config_map, genome_directory_list, genome_fasta_path_list, output_genome_directory_list)
+                                
+            # Step 2 - end
+            sys.stdout.write('Done!\n')
+
+            # time record, calculate elapsed time, and display work end
+            finish_time = datetime.now()
+            duration = finish_time - start_time
+            sys.stdout.write("[%s] Ending %s run\n" % (utils.curr_time(), program_name))
+            sys.stdout.write("Total Elapsed Time =  %s [seconds]\n" % utils.format_time(duration))
+            sys.stdout.write("********************************************************************************\n\n")
+
+
+        # Error handling
+        except utils.Usage, err:
+            sys.stderr.write("%s: %s\n" %(os.path.basename(sys.argv[0]), str(err.msg)))
+            return 2
+
+
+    # Error handling
+    except utils.Usage, err:
+        sys.stderr.write("%s: %s\n" %(os.path.basename(sys.argv[0]), str(err.msg)))
+        sys.stderr.write("for help use -h/--help")
+        return 2
+
+
+## If this program runs as standalone, then exit.
+if __name__ == "__main__":
+    sys.exit(main())
