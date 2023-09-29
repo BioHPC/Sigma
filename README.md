@@ -5,7 +5,7 @@ Tae-Hyuk Ahn, Juanjuan Chai, Chongle Pan, Sigma: Strain-level inference of genom
 
 ### Summary
 Identification of microbes and accurate estimation of their relative abundance are crucial subjects in metagenomic analysis. Existing taxonomic classification methods are unsuitable for metagenomic biosurveillance due to the following three factors. First, reference genomes including complete genomes of pathogenic bacteria are required. Second, strain-level genome identification from the same species is essential. Third, statistical confidence evaluation of the metagenomic analysis is recommended. We developed Sigma (Strain-level Inference of Genomes from Metagenomic Analysis), a novel sequence similarity-based approach for strain-level identification of genomes from metagenomic analysis for biosurveillance. Nucleotide-level alignment analysis using maximum likelihood estimation empowers Sigma to estimate the relative abundances and likelihood ratios of each genome accurately given a list of reference genomes. The hybrid parallel architecture of the SIGMA allows its computation to be scalable from desktops to supercomputers for different sizes of metagenomic reads and reference datasets.
-![](https://github.com/BioHPC/Sigma/blob/main/figures/overview_figure.gif)
+![](https://github.com/BioHPC/Sigma/blob/main/figures/overview_figure.gif){:style="display:block; margin-left:auto; margin-right:auto"}
 
 ### Manual
 Please check the SIGMA User Manual for details.
