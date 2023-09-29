@@ -1,0 +1,331 @@
+#!/usr/bin/env python
+
+
+"""
+sigma-target-reads
+
+sigma-target-reads is a program to report target reads for the genome
+based on the sigma results.
+
+Created by Tae-Hyuk (Ted) Ahn on 04/01/2013.
+Copyright (c) 2013 Tae-Hyuk Ahn (ORNL). Allrights reserved.
+"""
+
+
+## Import Python package modules
+import sys, warnings, os, getopt
+import time
+from datetime import datetime
+from subprocess import Popen, PIPE, check_call, STDOUT
+import utils
+import sigma_core
+import sigma_parse_config
+
+
+## Version control
+version = "1.0.1 (Beta)" 
+"""
+1. Release V1.0.1
+"""
+
+
+## Help message
+help_message = '''
+
+  [Usage]
+    sigma-target-reads [options] -c <config file path> -w <working directory>
+
+  [Inputs]
+    1. config file path (default: sigma_config.cfg)
+      - if config_file is not specified, the program will search it in the working directory.
+    2. working directory (default = current running directory)
+      - if working_directory is not specified, the program will work in the current directory.
+      - results will be generated in working directory
+
+  [Options]
+    -h/--help
+    -v/--version
+
+  [Outputs]
+    genome_basename.target.bam
+'''
+
+
+## Import classes
+ConfigString = sigma_parse_config.ConfigString
+
+
+## global variables
+config_path_str       = "config_path"
+working_directory_str = "working_directory"
+
+
+## Parse options
+def parse_option(argv, version, help_message):
+
+    # initialize variables
+    working_directory = "./"
+    config_file       = "sigma_config.cfg"
+    config_path       = working_directory + config_file
+
+    # option map dictionay
+    option_map = {}
+
+    # get arguments
+    try:
+        opts, args = getopt.getopt(argv[1:], "c:w:hvV",
+                                    ["help",
+                                     "version"])
+
+    # Error handling of options
+    except getopt.error, msg:
+        raise utils.Usage(msg)
+
+    # get program name
+    program_name =  sys.argv[0].split("/")[-1]
+
+    # Basic options
+    for option, value in opts:
+        # config file
+        if option in ("-c"):
+            config_path = value
+        # working directory
+        if option in ("-w"):
+            working_directory = value
+            if working_directory[-1] != '/':
+               working_directory += '/'
+        # help
+        if option in ("-h", "--help"):
+            raise utils.Usage(help_message)
+        # version
+        if option in ("-v", "-V", "--version"):
+            print "\n%s V%s\n" % (program_name, version)
+            sys.exit(0)
+
+    # only -w is provided
+    if working_directory != "./" and config_path == "./sigma_config.cfg":
+        config_path = working_directory + config_file
+
+    # check config file path exist
+    if not utils.check_path_exist(config_path):
+        sys.stderr.write("\n** Cannot open %s. For help use -h/--help.\n" % config_path)
+        utils.die("** Program exit!")
+
+    # check working directory path exist
+    if not utils.check_path_exist(working_directory):
+        sys.stderr.write("\n** Cannot open %s. For help use -h/--help.\n" % working_directory)
+        utils.die("** Program exit!")
+
+    # option_map
+    option_map[config_path_str] = config_path
+    option_map[working_directory_str] = working_directory
+
+    return (option_map)
+
+
+# filtering each target genome
+def filtering_target_genome(qmatrix_path,
+                            genome_chance_map,
+                            genome_name,
+                            genome_directory,
+                            genome_enum,
+                            target_genome_index,
+                            output_genome_directory,
+                            samtools_path,
+                            samout_path,
+                            bamout_path,
+                            filtered_samout_path,
+                            filtered_bamout_path):
+
+    # get read id map based on t-value
+    target_reads_list = sigma_core.reads_by_tvalue(qmatrix_path, genome_chance_map, target_genome_index)
+
+    # convert bam to sam
+    if utils.check_path_exist(bamout_path):    
+        system_cmd = samtools_path + " view -h " + bamout_path + " -o " + samout_path    
+        check_call(system_cmd, shell=True, stdout = PIPE, stderr = sys.stderr)  
+
+    # open to write filtered sam output
+    filtered_samout = open(filtered_samout_path, 'wb')
+
+    # open sam file and read/write
+    with open(samout_path, 'r') as f:
+        for read_line in f:
+
+            # get read_line
+            read_line = read_line.strip()
+
+            # header
+            if read_line[0] == '@':
+                filtered_samout.write(read_line + "\n")
+                continue
+
+            # split by tab
+            read_line_list = read_line.split('\t')
+
+            # call ParseSamout class for read_line_list
+            read_id = read_line_list[0]
+
+            # check fasta format read ID that is different to the Q-matrix
+            read_id_list = read_id.split('.')
+            if len(read_id_list) == 2:
+                if (read_id_list[1] == "1") or (read_id_list[1] == "2"):
+                    read_id = read_id_list[0]
+
+            # if read_id exist in the target_reads_list, then write
+            if read_id in target_reads_list:
+                filtered_samout.write(read_line + "\n")
+
+    # convert sam to bam
+    if utils.check_path_exist(filtered_samout_path):    
+        system_cmd = samtools_path + " view -bS " + filtered_samout_path + " > " + filtered_bamout_path    
+        check_call(system_cmd, shell=True, stdout = PIPE, stderr = sys.stderr)  
+
+
+def filtering_reads(option_map, config_map, genome_directory_list, genome_fasta_path_list, output_genome_directory_list):
+
+    # get option
+    config_path = option_map[config_path_str]
+    working_directory = option_map[working_directory_str]
+
+    # get config default
+    filtering_genome_name = ""
+    samtools_cmd = "samtools"
+    samtools_path = samtools_cmd
+
+    # get config value
+    if config_map[ConfigString.filtering_genome_name_str]:
+        filtering_genome_name = config_map[ConfigString.filtering_genome_name_str]
+    else:
+        sys.stderr.write("\n** Provide Filtering_Genome_Name in the config file!\n" % config_path)
+        utils.die("** Program exit!")
+
+    if config_map[ConfigString.samtools_directory_str]:
+        samtools_directory = config_map[ConfigString.samtools_directory_str]
+        if samtools_directory[-1] != '/':
+            samtools_directory += '/'
+        samtools_path = samtools_directory + samtools_cmd
+
+    # get g-vector path
+    qmatrix_filename = "sigma_out.qmatrix.txt"
+    qmatrix_basename = '.'.join(qmatrix_filename.split('.')[0:-2])
+    qmatrix_path = working_directory + qmatrix_filename
+    gvector_path = working_directory + qmatrix_basename + ".gvector.txt"
+
+    # get paried_reads_flag and fasta_reads_flag
+    (paired_end_reads_flag, fasta_reads_flag) = sigma_core.get_reads_type(config_map)
+
+    # get genome_directory_map and output_genome_directory_map
+    (genome_directory_map, 
+     output_genome_directory_map) = sigma_core.get_genome_directory_map(genome_directory_list, 
+                                                                        output_genome_directory_list)
+
+    # get target genome list (g_vector percentage >= cutoff_reconstruction_percentage)
+    (genome_name_map, 
+     genome_chance_map, 
+     target_genome_index_list) = sigma_core.get_filtering_target_genome(gvector_path, 
+                                                                        filtering_genome_name)
+
+    # for loop target_genome_index_list
+    for target_genome_enum, target_genome_index in enumerate(target_genome_index_list):
+
+        # get genome info
+        genome_name = genome_name_map[target_genome_index]
+        genome_directory = genome_directory_map[genome_name]
+        genome_enum = genome_directory_list.index(genome_directory)
+        output_genome_directory = output_genome_directory_map[genome_name]
+        samout_path = sigma_core.get_samout_path(config_path, output_genome_directory)
+        bamout_path = sigma_core.get_bamout_path(config_path, output_genome_directory)
+        filtered_samout_path = sigma_core.get_filtered_samout_path(config_path, output_genome_directory)
+        filtered_bamout_path = sigma_core.get_filtered_bamout_path(config_path, output_genome_directory)
+
+        # reconstruct each target genome
+        filtering_target_genome(qmatrix_path,
+                                genome_chance_map,
+                                genome_name,
+                                genome_directory,
+                                genome_enum,
+                                target_genome_index,
+                                output_genome_directory,
+                                samtools_path,
+                                samout_path,
+                                bamout_path,
+                                filtered_samout_path,
+                                filtered_bamout_path)
+
+
+
+
+        sys.stdout.write("  Genome (%s) reads has been filtered." % (genome_name))
+    
+
+
+                           
+def main(argv=None):
+
+    # try to get arguments and error handling
+    try:
+        if argv is None:
+            argv = sys.argv
+        try:
+            # get program name
+            program_name =  os.path.basename(sys.argv[0])
+
+            # parse option
+            (option_map) = parse_option(argv, version, help_message)
+
+            # parse config
+            (config_map) = sigma_parse_config.parse_config(option_map)
+
+            # Display work start and time record
+            start_time = datetime.now()
+            sys.stdout.write("\n********************************************************************************\n")
+            sys.stdout.write("[%s] Beginning %s run (V%s)\n" % (utils.curr_time(), program_name, version))
+
+            # Step 1
+            sys.stdout.write("  [Step 1] Prepare target genome reads filtering: ")
+            sys.stdout.write("Running -> ")
+
+            # call sigma_core.search_genome_fasta_path
+            (genome_directory_list, genome_fasta_path_list) = sigma_core.search_genome_fasta_path(config_map)
+
+            # call sigma_core.get_output_genome_directory_list
+            (output_genome_directory_list) = sigma_core.get_output_genome_directory_list(option_map, config_map, genome_directory_list)
+
+            # Step 1 - end
+            sys.stdout.write('Done!\n')
+
+            # Step 2 - start
+            sys.stdout.write("  [Step 2] Work target genome reads filtering: ")
+            sys.stdout.write("Running -> ")
+
+            # Reconstruct genomes
+            filtering_reads(option_map, config_map, genome_directory_list, genome_fasta_path_list, output_genome_directory_list)
+                                
+            # Step 2 - end
+            sys.stdout.write('Done!\n')
+
+            # time record, calculate elapsed time, and display work end
+            finish_time = datetime.now()
+            duration = finish_time - start_time
+            sys.stdout.write("[%s] Ending %s run\n" % (utils.curr_time(), program_name))
+            sys.stdout.write("Total Elapsed Time =  %s [seconds]\n" % utils.format_time(duration))
+            sys.stdout.write("********************************************************************************\n\n")
+
+
+        # Error handling
+        except utils.Usage, err:
+            sys.stderr.write("%s: %s\n" %(os.path.basename(sys.argv[0]), str(err.msg)))
+            return 2
+
+
+    # Error handling
+    except utils.Usage, err:
+        sys.stderr.write("%s: %s\n" %(os.path.basename(sys.argv[0]), str(err.msg)))
+        sys.stderr.write("for help use -h/--help")
+        return 2
+
+
+## If this program runs as standalone, then exit.
+if __name__ == "__main__":
+    sys.exit(main())
