@@ -11,7 +11,7 @@ Identification of microbes and accurate estimation of their relative abundance a
 </p>
 
 ### Manual
-Please check the SIGMA User Manual for details.
+Please check the [SIGMA User Manual](https://github.com/BioHPC/Sigma/blob/main/SIGMA_UserManual_1.1.0.pdf) for details.
 
 ### Prerequisites
 * Bowtie2 [https://github.com/BenLangmead/bowtie2](https://github.com/BenLangmead/bowtie2)
